@@ -178,7 +178,7 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	}
 	defer l.Close()
 
-	userDN := fmt.Sprintf("%s=%s,%s", m.UserAttr, ldap.EscapeFilter(username), m.BaseDN)
+	userDN := fmt.Sprintf("%s=%s,%s", m.UserAttr, ldap.EscapeDN(username), m.BaseDN)
 	err = l.Bind(userDN, password)
 	if err != nil {
 		logger.Warn("LDAP bind failed", zap.String("user", username), zap.Error(err))
@@ -195,7 +195,7 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		groupFilter := fmt.Sprintf("(%s=%s)", m.GroupMembershipAttr, ldap.EscapeFilter(userDN))
 		logger.Debug("Preparing LDAP group membership search", zap.String("base", m.BaseDN), zap.String("filter", groupFilter), zap.String("userDN", userDN))
 		groupSearch := ldap.NewSearchRequest(
-			m.BaseDN,
+			m.GroupMembershipDN,
 			ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 0, false,
 			groupFilter,
 			[]string{"dn"},
