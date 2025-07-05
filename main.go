@@ -3,10 +3,12 @@ package ldapbasicauth
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -30,6 +32,12 @@ type LDAPBasicAuth struct {
 	GroupMembershipAttr string `json:"group_membership_attr,omitempty"`
 	UseLDAPS            bool   `json:"use_ldaps,omitempty"`
 	InsecureSkipVerify  bool   `json:"insecure_skip_verify,omitempty"`
+	PoolSize            int    `json:"pool_size,omitempty"` // <-- add this
+
+	poolOnce sync.Once
+	pool     chan *ldap.Conn
+
+	anonymousBindSupported bool
 }
 
 var (
@@ -93,6 +101,16 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				m.InsecureSkipVerify = true
+			case "pool_size":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				var size int
+				_, err := fmt.Sscanf(d.Val(), "%d", &size)
+				if err != nil || size < 1 {
+					return d.Errf("invalid pool_size value: %s", d.Val())
+				}
+				m.PoolSize = size
 			default:
 				return d.Errf("unrecognized subdirective '%s'", d.Val())
 			}
@@ -102,8 +120,88 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	if m.GroupMembershipAttr == "" {
 		m.GroupMembershipAttr = "member"
 	}
+	if m.PoolSize == 0 {
+		m.PoolSize = 5
+	}
 
 	return nil
+}
+
+func (m *LDAPBasicAuth) initPool() {
+	m.poolOnce.Do(func() {
+		m.pool = make(chan *ldap.Conn, m.PoolSize)
+		m.anonymousBindSupported = m.supportsAnonymousBind()
+		if !m.anonymousBindSupported {
+			caddy.Log().Named("ldap_basic_auth").Warn("LDAP server does not support anonymous/unauthenticated bind; connection pooling is disabled")
+		}
+	})
+}
+
+func (m *LDAPBasicAuth) newConn() (*ldap.Conn, error) {
+	if m.UseLDAPS {
+		serverName := strings.Split(m.LDAPServer, ":")[0]
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: m.InsecureSkipVerify,
+			ServerName:         serverName,
+		}
+		return ldap.DialTLS("tcp", m.LDAPServer, tlsConfig)
+	}
+	return ldap.Dial("tcp", m.LDAPServer)
+}
+
+func (m *LDAPBasicAuth) getConn() (*ldap.Conn, error) {
+	m.initPool()
+	logger := caddy.Log().Named("ldap_basic_auth")
+	for {
+		select {
+		case conn := <-m.pool:
+			logger.Debug("Got connection from pool, performing health check")
+			// Health check
+			if err := conn.Bind("", ""); err != nil && !errors.Is(err, ldap.NewError(ldap.LDAPResultInvalidCredentials, nil)) {
+				logger.Debug("Connection from pool failed health check, closing", zap.Error(err))
+				conn.Close()
+				continue // try next or create new
+			}
+			logger.Debug("Connection from pool passed health check")
+			return conn, nil
+		default:
+			logger.Debug("No connection available in pool, creating new connection")
+			return m.newConn()
+		}
+	}
+}
+
+func (m *LDAPBasicAuth) putConn(conn *ldap.Conn) {
+	logger := caddy.Log().Named("ldap_basic_auth")
+	if !m.anonymousBindSupported {
+		logger.Debug("Anonymous bind not supported, closing connection after use")
+		conn.Close()
+		return
+	}
+
+	if err := conn.Bind("", ""); err != nil {
+		logger.Debug("Failed to anonymous-bind before returning to pool, closing connection", zap.Error(err))
+		conn.Close()
+		return
+	}
+
+	select {
+	case m.pool <- conn:
+		logger.Debug("Returned connection to pool")
+	default:
+		logger.Debug("Pool is full, closing connection")
+		conn.Close()
+	}
+}
+
+func (m *LDAPBasicAuth) supportsAnonymousBind() bool {
+	conn, err := m.newConn()
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	err = conn.Bind("", "")
+	return err == nil
 }
 
 func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -153,19 +251,11 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	if m.InsecureSkipVerify {
 		logger.Warn("TLS certificate verification is disabled! This is insecure and should not be used in production.")
 	}
+
+	// Use connection pool
 	var l *ldap.Conn
 	var err error
-	if m.UseLDAPS {
-		serverName := strings.Split(m.LDAPServer, ":")[0]
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: m.InsecureSkipVerify,
-			ServerName:         serverName,
-		}
-		l, err = ldap.DialTLS("tcp", m.LDAPServer, tlsConfig)
-	} else {
-		l, err = ldap.Dial("tcp", m.LDAPServer)
-	}
-
+	l, err = m.getConn()
 	if err != nil {
 		logger.Error("LDAP connection failed", zap.String("user", username), zap.Error(err))
 		w.WriteHeader(http.StatusUnauthorized)
@@ -176,7 +266,7 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		w.WriteHeader(http.StatusUnauthorized)
 		return nil
 	}
-	defer l.Close()
+	defer m.putConn(l)
 
 	userDN := fmt.Sprintf("%s=%s,%s", m.UserAttr, ldap.EscapeDN(username), m.BaseDN)
 	err = l.Bind(userDN, password)
@@ -195,7 +285,7 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		groupFilter := fmt.Sprintf("(%s=%s)", m.GroupMembershipAttr, ldap.EscapeFilter(userDN))
 		logger.Debug("Preparing LDAP group membership search", zap.String("base", m.BaseDN), zap.String("filter", groupFilter), zap.String("userDN", userDN))
 		groupSearch := ldap.NewSearchRequest(
-			m.GroupMembershipDN,
+			m.BaseDN,
 			ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 0, false,
 			groupFilter,
 			[]string{"dn"},
