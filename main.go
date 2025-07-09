@@ -33,7 +33,11 @@ type LDAPBasicAuth struct {
 	GroupMembershipAttr string `json:"group_membership_attr,omitempty"`
 	UseLDAPS            bool   `json:"use_ldaps,omitempty"`
 	InsecureSkipVerify  bool   `json:"insecure_skip_verify,omitempty"`
-	PoolSize            int    `json:"pool_size,omitempty"` // <-- add this
+	PoolSize            int    `json:"pool_size,omitempty"`
+
+	RateLimitMaxAttempts     int           `json:"rate_limit_max_attempts,omitempty"`
+	RateLimitWindowSeconds   int           `json:"rate_limit_window_seconds,omitempty"`
+	RateLimitLockoutSeconds  int           `json:"rate_limit_lockout_seconds,omitempty"`
 
 	poolOnce sync.Once
 	pool     chan *ldap.Conn
@@ -112,6 +116,36 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("invalid pool_size value: %s", d.Val())
 				}
 				m.PoolSize = size
+			case "rate_limit_max_attempts":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				var v int
+				_, err := fmt.Sscanf(d.Val(), "%d", &v)
+				if err != nil || v < 1 {
+					return d.Errf("invalid rate_limit_max_attempts: %s", d.Val())
+				}
+				m.RateLimitMaxAttempts = v
+			case "rate_limit_window_seconds":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				var v int
+				_, err := fmt.Sscanf(d.Val(), "%d", &v)
+				if err != nil || v < 1 {
+					return d.Errf("invalid rate_limit_window_seconds: %s", d.Val())
+				}
+				m.RateLimitWindowSeconds = v
+			case "rate_limit_lockout_seconds":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				var v int
+				_, err := fmt.Sscanf(d.Val(), "%d", &v)
+				if err != nil || v < 1 {
+					return d.Errf("invalid rate_limit_lockout_seconds: %s", d.Val())
+				}
+				m.RateLimitLockoutSeconds = v
 			default:
 				return d.Errf("unrecognized subdirective '%s'", d.Val())
 			}
@@ -123,6 +157,15 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	}
 	if m.PoolSize == 0 {
 		m.PoolSize = 5
+	}
+	if m.RateLimitMaxAttempts == 0 {
+		m.RateLimitMaxAttempts = 5
+	}
+	if m.RateLimitWindowSeconds == 0 {
+		m.RateLimitWindowSeconds = 60
+	}
+	if m.RateLimitLockoutSeconds == 0 {
+		m.RateLimitLockoutSeconds = 300
 	}
 
 	return nil
@@ -225,6 +268,54 @@ func getClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+type rateLimitInfo struct {
+	Attempts    int
+	FirstFailed time.Time
+	LockedUntil time.Time
+}
+
+var rateLimitMap sync.Map
+
+func (m *LDAPBasicAuth) checkRateLimit(ip string) (locked bool, until time.Time) {
+	now := time.Now()
+	val, _ := rateLimitMap.LoadOrStore(ip, &rateLimitInfo{})
+	info := val.(*rateLimitInfo)
+
+	if info.LockedUntil.After(now) {
+		return true, info.LockedUntil
+	}
+	window := time.Duration(m.RateLimitWindowSeconds) * time.Second
+	if now.Sub(info.FirstFailed) > window {
+		info.Attempts = 0
+		info.FirstFailed = now
+	}
+	return false, time.Time{}
+}
+
+func (m *LDAPBasicAuth) registerFailedAttempt(ip string) {
+	now := time.Now()
+	val, _ := rateLimitMap.LoadOrStore(ip, &rateLimitInfo{})
+	info := val.(*rateLimitInfo)
+
+	window := time.Duration(m.RateLimitWindowSeconds) * time.Second
+	lockout := time.Duration(m.RateLimitLockoutSeconds) * time.Second
+
+	if now.Sub(info.FirstFailed) > window {
+		info.Attempts = 1
+		info.FirstFailed = now
+		info.LockedUntil = time.Time{}
+	} else {
+		info.Attempts++
+		if info.Attempts >= m.RateLimitMaxAttempts {
+			info.LockedUntil = now.Add(lockout)
+		}
+	}
+}
+
+func (m *LDAPBasicAuth) resetRateLimit(ip string) {
+	rateLimitMap.Delete(ip)
+}
+
 func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	logger := caddy.Log().Named("ldap_basic_auth")
 	auth := r.Header.Get("Authorization")
@@ -243,22 +334,41 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 
 		return nil
 	}
+
+    if locked, until := m.checkRateLimit(remote_addr); locked {
+		logger.Warn("Too many failed attempts, IP is temporarily locked", zap.String("remote_addr", remote_addr), zap.Time("locked_until", until))
+		
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(until.Sub(time.Now()).Seconds())))
+		w.WriteHeader(http.StatusTooManyRequests)
+
+        return nil
+    }
+
 	payload, perr := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	if perr != nil {
 		logger.Warn("Base64 decode failed", zap.String("remote_addr", remote_addr))
+
 		w.WriteHeader(http.StatusUnauthorized)
+		m.registerFailedAttempt(remote_addr)
+
 		return nil
 	}
 	pair := strings.SplitN(string(payload), ":", 2)
 	if len(pair) != 2 {
 		logger.Warn("Malformed credentials", zap.String("remote_addr", remote_addr))
+
 		w.WriteHeader(http.StatusUnauthorized)
+		m.registerFailedAttempt(remote_addr)
+
 		return nil
 	}
 	username, password := pair[0], pair[1]
 	if strings.ContainsAny(username, ",=+<>#;\"\\") || strings.TrimSpace(username) != username || strings.ContainsAny(username, " \t\r\n") {
 		logger.Warn("Username contains invalid/suspicious or whitespace characters", zap.String("user", username), zap.String("remote_addr", remote_addr))
+		
 		w.WriteHeader(http.StatusUnauthorized)
+		m.registerFailedAttempt(remote_addr)
+
 		return nil
 	}
 	// Restrict usernames to ASCII only
@@ -266,6 +376,7 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		if char > 127 {
 			logger.Warn("Username contains non-ASCII characters", zap.String("user", username), zap.String("remote_addr", remote_addr))
 			w.WriteHeader(http.StatusUnauthorized)
+			m.registerFailedAttempt(remote_addr)
 			return nil
 		}
 	}
@@ -281,12 +392,18 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	l, err = m.getConn()
 	if err != nil {
 		logger.Error("LDAP connection failed", zap.String("user", username), zap.Error(err))
+
 		w.WriteHeader(http.StatusUnauthorized)
+		m.registerFailedAttempt(remote_addr)
+
 		return nil
 	}
 	if l == nil {
 		logger.Error("LDAP connection returned nil")
+
 		w.WriteHeader(http.StatusUnauthorized)
+		m.registerFailedAttempt(remote_addr)
+
 		return nil
 	}
 	defer m.putConn(l)
@@ -295,9 +412,11 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	err = l.Bind(userDN, password)
 	if err != nil {
 		logger.Warn("LDAP bind failed", zap.String("user", username), zap.Error(err))
-		// Add a small random delay to mitigate timing attacks
+		m.registerFailedAttempt(remote_addr)
+		
 		time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
 		w.WriteHeader(http.StatusUnauthorized)
+
 		return nil
 	}
 
@@ -328,11 +447,13 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 			// Add a small random delay to mitigate timing attacks
 			time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
 			w.WriteHeader(http.StatusUnauthorized)
+			m.registerFailedAttempt(remote_addr)
 			return nil
 		}
 		logger.Debug("User is a member of group", zap.String("user", username), zap.String("group", m.GroupMembershipDN), zap.String("filter", groupFilter))
 	}
 
+	m.resetRateLimit(remote_addr)
 	logger.Info("Authentication successful", zap.String("user", username), zap.String("remote_addr", remote_addr))
 
 	return next.ServeHTTP(w, r)
