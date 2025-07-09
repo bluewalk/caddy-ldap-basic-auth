@@ -16,9 +16,9 @@ This plugin provides HTTP Basic Authentication for Caddy v2 using an LDAP server
 ## Installation
 
 **Build Caddy with the plugin:**
-   
+
 Use [xcaddy](https://github.com/caddyserver/xcaddy) to build Caddy with this plugin:
-   
+
 ```sh
 xcaddy build \
   --with github.com/bluewalk/caddy-ldap-basic-auth
@@ -39,13 +39,17 @@ Add the `ldap_basic_auth` directive to your Caddyfile:
 ```
 route {
     ldap_basic_auth {
-        ldap_server            "ldap.example.com:636"
-        base_dn                "ou=users,dc=example,dc=com"
-        user_attr              "uid"
-        group_membership_dn    "cn=admins,ou=groups,dc=example,dc=com"
-        group_membership_attr  "member"
+        ldap_server                 "ldap.example.com:636"
+        base_dn                     "ou=users,dc=example,dc=com"
+        user_attr                   "uid"
+        group_membership_dn         "cn=admins,ou=groups,dc=example,dc=com"
+        group_membership_attr       "member"
         use_ldaps
-        insecure_skip_verify   # Optional, only for self-signed certs
+        insecure_skip_verify        # Optional, only for self-signed certs
+        pool_size                   5
+        rate_limit_max_attempts     5
+        rate_limit_window_seconds   60
+        rate_limit_lockout_seconds  300
     }
     respond "Hello, {http.auth.user}!"
 }
@@ -55,13 +59,17 @@ route {
 
 | Option                    | Type     | Required | Description                                                                                   |
 |---------------------------|----------|----------|-----------------------------------------------------------------------------------------------|
-| `ldap_server`             | string   | Yes      | Host:port of your LDAP/LDAPS server.                                                          |
-| `base_dn`                 | string   | Yes      | Base DN for user search (e.g., `ou=users,dc=example,dc=com`).                                 |
-| `user_attr`               | string   | Yes      | Attribute for username (e.g., `uid` or `sAMAccountName`).                                     |
-| `group_membership_dn`     | string   | No       | DN of the group to require membership in.                                                     |
-| `group_membership_attr`   | string   | No       | Attribute for group membership (default: `member`).                                           |
-| `use_ldaps`               | flag     | No       | Use LDAPS (LDAP over TLS).                                                                    |
-| `insecure_skip_verify`    | flag     | No       | Skip TLS verification (not recommended for production).                                       |
+| `ldap_server`             | string   | Yes      | Host:port of your LDAP/LDAPS server. |
+| `base_dn`                 | string   | Yes      | Base DN for user search (e.g., `ou=users,dc=example,dc=com`). |
+| `user_attr`               | string   | Yes      | Attribute for username (e.g., `uid` or `sAMAccountName`). |
+| `group_membership_dn`     | string   | No       | DN of the group to require membership in. |
+| `group_membership_attr`   | string   | No       | Attribute for group membership (default: `member`). |
+| `use_ldaps`               | flag     | No       | Use LDAPS (LDAP over TLS). (default: `false`) |
+| `insecure_skip_verify`    | flag     | No       | Skip TLS verification (not recommended for production). (default: `false`) |
+| `pool_size`               | int      | No       | LDAP connection pool size (default: `5`)
+| `rate_limit_max_attempts`  | int      | No       | Rate limiting: max attempts (default: `5`) |
+| `rate_limit_window_seconds`  | int      | No       | Rate limiting: window in seconds (default: `60`) |
+| `rate_limit_lockout_seconds`  | int      | No       | Rate limiting: lockout in seconds (default: `300`) |
 
 ## Logging
 
