@@ -1,6 +1,6 @@
 module github.com/bluewalk/caddy-ldap-basic-auth
 
-go 1.24.4
+go 1.24.5
 
 require (
 	github.com/caddyserver/caddy/v2 v2.10.0
