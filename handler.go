@@ -175,5 +175,8 @@ func (m *LDAPBasicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	m.resetRateLimit(remote_addr)
 	logger.Info("Authentication successful", zap.String("user", username), zap.String("remote_addr", remote_addr))
 
+	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+	repl.Set("ldap.basicauth.username", username)
+
 	return next.ServeHTTP(w, r)
 }

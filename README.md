@@ -71,6 +71,9 @@ route {
 | `rate_limit_window_seconds`  | int      | No       | Rate limiting: window in seconds (default: `60`) |
 | `rate_limit_lockout_seconds`  | int      | No       | Rate limiting: lockout in seconds (default: `300`) |
 
+### Variables
+After succesful authentication, the variable `ldap.basicauth.username` is set to the authenticated user. This variable can be used in, for example: paths when using webdav `/var/www/{ldap.basicauth.username}/data`.
+
 ## Logging
 
 This plugin uses Caddy's structured logging. You can control log levels and output in your Caddyfile:
