@@ -12,6 +12,9 @@ type LDAPBasicAuth struct {
     LDAPServer          		string	`json:"ldap_server"`
     BaseDN              		string	`json:"base_dn"`
     UserAttr            		string	`json:"user_attr"`
+    Filter              		string	`json:"filter,omitempty"`
+	BindUsername 				string  `json:"bind_username,omitempty"`
+	BindPassword 				string  `json:"bind_password,omitempty"`
     GroupMembershipDN   		string	`json:"group_membership_dn"`
     GroupMembershipAttr 		string 	`json:"group_membership_attr,omitempty"`
     UseLDAPS            		bool	`json:"use_ldaps,omitempty"`
@@ -50,6 +53,21 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				m.UserAttr = d.Val()
+			case "filter":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.Filter = d.Val()
+			case "bind_username":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.BindUsername = d.Val()
+			case "bind_password":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.BindPassword = d.Val()
 			case "group_membership_dn":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -116,6 +134,9 @@ func (m *LDAPBasicAuth) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 	}
 
+	if m.Filter == "" {
+		m.Filter = "(objectClass=inetOrgPerson)"
+	}
 	if m.GroupMembershipAttr == "" {
 		m.GroupMembershipAttr = "member"
 	}

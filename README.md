@@ -2,6 +2,11 @@
 
 This plugin provides HTTP Basic Authentication for Caddy v2 using an LDAP server for credential validation and group membership checks.
 
+Folk from: [github.com/bluewalk/caddy-ldap-basic-auth](https://github.com/bluewalk/caddy-ldap-basic-auth), thanks for your work.
+
+Improve:
+- Implement user DN search and authenticate via the retrieved DN.
+
 ## Features
 - Authenticate users against an LDAP/LDAPS server
 - Optionally require group membership for access
@@ -21,7 +26,7 @@ Use [xcaddy](https://github.com/caddyserver/xcaddy) to build Caddy with this plu
 
 ```sh
 xcaddy build \
-  --with github.com/bluewalk/caddy-ldap-basic-auth
+  --with github.com/jerryhan77/caddy-ldap-basic-auth
 ```
 
 **OR**
@@ -29,7 +34,7 @@ xcaddy build \
 Use caddy's `add-package` to add this plugin
 
 ```sh
-caddy add-package github.com/bluewalk/caddy-ldap-basic-auth
+caddy add-package github.com/jerryhan77/caddy-ldap-basic-auth
 ```
 
 ## Configuration
@@ -62,8 +67,9 @@ route {
 | `ldap_server`             | string   | Yes      | Host:port of your LDAP/LDAPS server. |
 | `base_dn`                 | string   | Yes      | Base DN for user search (e.g., `ou=users,dc=example,dc=com`). |
 | `user_attr`               | string   | Yes      | Attribute for username (e.g., `uid` or `sAMAccountName`). |
-| `group_membership_dn`     | string   | No       | DN of the group to require membership in. |
-| `group_membership_attr`   | string   | No       | Attribute for group membership (default: `member`). |
+| `filter`                  | string   | No       | LDAP Search filter for user DN search (default: `(objectClass=inetOrgPerson)`). |
+| `bind_username`           | string   | No       | User DN for search directory |
+| `bind_password`           | string   | No       | User password for search directory |
 | `use_ldaps`               | flag     | No       | Use LDAPS (LDAP over TLS). (default: `false`) |
 | `insecure_skip_verify`    | flag     | No       | Skip TLS verification (not recommended for production). (default: `false`) |
 | `pool_size`               | int      | No       | LDAP connection pool size (default: `5`)

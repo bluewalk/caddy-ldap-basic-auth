@@ -1,13 +1,13 @@
 package ldapbasicauth
 
 import (
-    "crypto/tls"
-    "errors"
-    "strings"
+	"crypto/tls"
+	"errors"
+	"strings"
 
-    "github.com/caddyserver/caddy/v2"
-    "github.com/go-ldap/ldap/v3"
-    "go.uber.org/zap"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/go-ldap/ldap/v3"
+	"go.uber.org/zap"
 )
 
 func (m *LDAPBasicAuth) initPool() {
@@ -40,7 +40,7 @@ func (m *LDAPBasicAuth) getConn() (*ldap.Conn, error) {
 		case conn := <-m.pool:
 			logger.Debug("Got connection from pool, performing health check")
 			// Health check
-			if err := conn.Bind("", ""); err != nil && !errors.Is(err, ldap.NewError(ldap.LDAPResultInvalidCredentials, nil)) {
+			if err := conn.UnauthenticatedBind(""); err != nil && !errors.Is(err, ldap.NewError(ldap.LDAPResultInvalidCredentials, nil)) {
 				logger.Debug("Connection from pool failed health check, closing", zap.Error(err))
 				conn.Close()
 				continue
@@ -62,7 +62,7 @@ func (m *LDAPBasicAuth) putConn(conn *ldap.Conn) {
 		return
 	}
 
-	if err := conn.Bind("", ""); err != nil {
+	if err := conn.UnauthenticatedBind(""); err != nil {
 		logger.Debug("Failed to anonymous-bind before returning to pool, closing connection", zap.Error(err))
 		conn.Close()
 		return
@@ -83,6 +83,6 @@ func (m *LDAPBasicAuth) supportsAnonymousBind() bool {
 		return false
 	}
 	defer conn.Close()
-	err = conn.Bind("", "")
+	err = conn.UnauthenticatedBind("")
 	return err == nil
 }
